@@ -56,7 +56,9 @@ const upcomingCelebrations = async (companyId) => {
   return { birthdays, anniversaries };
 };
 
-const companyAdminStats = async (companyId) => {
+// `days` sizes the attendance trend window only (1 = today, 7 = week, 30 = month);
+// every other stat on this dashboard is point-in-time and ignores it.
+const companyAdminStats = async (companyId, days = 7) => {
   const date = todayStr();
   const [
     totalEmployees,
@@ -99,12 +101,12 @@ const companyAdminStats = async (companyId) => {
 
   // ---- chart + feed datasets for the admin dashboard --------------------------
   const companyOid = new mongoose.Types.ObjectId(String(companyId));
-  const sevenDays = [...Array(7)].map((_, i) => dayjs().subtract(6 - i, 'day').format('YYYY-MM-DD'));
+  const span = [...Array(days)].map((_, i) => dayjs().subtract(days - 1 - i, 'day').format('YYYY-MM-DD'));
   const weekRows = await Attendance.aggregate([
-    { $match: { companyId: companyOid, date: { $in: sevenDays } } },
+    { $match: { companyId: companyOid, date: { $in: span } } },
     { $group: { _id: { date: '$date', status: '$status' }, count: { $sum: 1 } } },
   ]);
-  const weeklyAttendance = sevenDays.map((d) => {
+  const weeklyAttendance = span.map((d) => {
     const row = { day: dayjs(d).format('ddd'), date: d, present: 0, absent: 0, late: 0 };
     for (const r of weekRows) {
       if (r._id.date !== d) continue;
@@ -143,10 +145,55 @@ const companyAdminStats = async (companyId) => {
     Leave.find({ companyId, status: 'pending' }).populate('employeeId', 'personal.firstName personal.lastName').sort({ createdAt: -1 }).limit(5).lean(),
     AttendanceCorrection.find({ companyId, status: 'pending' }).populate('employeeId', 'personal.firstName personal.lastName').sort({ createdAt: -1 }).limit(3).lean(),
   ]);
+  // `_id` + `type` let the dashboard act on a row inline (approve/reject) instead
+  // of only linking out; `kind` keeps the human label the old shape exposed.
   const pendingApprovalsList = [
-    ...pendingLeaveDocs.map((l) => ({ title: 'Leave — ' + (l.leaveType || 'request'), employeeName: fullName(l.employeeId), status: 'pending', createdAt: l.createdAt })),
-    ...pendingCorrDocs.map((c) => ({ title: 'Attendance correction', employeeName: fullName(c.employeeId), status: 'pending', createdAt: c.createdAt })),
+    ...pendingLeaveDocs.map((l) => ({
+      _id: l._id,
+      type: 'leave',
+      kind: 'Leave',
+      title: 'Leave — ' + (l.leaveType || 'request'),
+      label: ((l.leaveType || 'casual') + ' leave').replace(/^./, (c) => c.toUpperCase()),
+      employeeId: l.employeeId ? l.employeeId._id : null,
+      employeeName: fullName(l.employeeId),
+      fromDate: l.fromDate,
+      toDate: l.toDate,
+      days: l.days,
+      status: 'pending',
+      createdAt: l.createdAt,
+    })),
+    ...pendingCorrDocs.map((c) => ({
+      _id: c._id,
+      type: 'correction',
+      kind: 'Attendance',
+      title: 'Attendance correction',
+      label: 'Attendance correction',
+      employeeId: c.employeeId ? c.employeeId._id : null,
+      employeeName: fullName(c.employeeId),
+      fromDate: c.date,
+      toDate: c.date,
+      status: 'pending',
+      createdAt: c.createdAt,
+    })),
   ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 8);
+
+  // ---- current-month payroll progress (drives the dashboard payroll card) -----
+  const prMonth = dayjs().month() + 1;
+  const prYear = dayjs().year();
+  const [payrollProcessed, payrollPendingThisMonth, payrollLocked] = await Promise.all([
+    Payroll.countDocuments({ companyId, month: prMonth, year: prYear, status: { $in: ['approved', 'paid', 'locked'] } }),
+    Payroll.countDocuments({ companyId, month: prMonth, year: prYear, status: { $in: ['draft', 'under_review'] } }),
+    Payroll.exists({ companyId, month: prMonth, year: prYear, status: 'locked' }),
+  ]);
+  const payrollProgress = {
+    month: prMonth,
+    year: prYear,
+    total: totalEmployees,
+    processed: payrollProcessed,
+    pending: payrollPendingThisMonth,
+    generated: payrollProcessed + payrollPendingThisMonth,
+    attendanceLocked: Boolean(payrollLocked),
+  };
 
   return {
     // flat aliases (the admin dashboard cards read these directly)
@@ -164,6 +211,7 @@ const companyAdminStats = async (companyId) => {
     departmentHeadcount,
     fieldActivity,
     pendingApprovalsList,
+    payrollProgress,
     employees: {
       total: totalEmployees,
       field: fieldEmployees,
@@ -288,7 +336,8 @@ const getDashboard = asyncHandler(async (req, res) => {
   let data;
   if ([ROLES.COMPANY_ADMIN, ROLES.HR_ADMIN, ROLES.PAYROLL_ADMIN, ROLES.SUPER_ADMIN].includes(role)) {
     const companyId = getCompanyId(req);
-    data = await companyAdminStats(companyId);
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 7, 1), 31);
+    data = await companyAdminStats(companyId, days);
   } else if (role === ROLES.MANAGER) {
     data = await managerStats(req.user.companyId, req.user.employeeId);
   } else {
