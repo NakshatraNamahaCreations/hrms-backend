@@ -6,6 +6,8 @@ const timesheetSchema = new mongoose.Schema(
     companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true, index: true },
     employeeId: { type: mongoose.Schema.Types.ObjectId, ref: 'Employee', required: true },
     projectId: { type: mongoose.Schema.Types.ObjectId, ref: 'Project', required: true },
+    // Optional: which task the hours went against, so estimates can be tracked.
+    taskId: { type: mongoose.Schema.Types.ObjectId, ref: 'Task', default: null },
     date: { type: String, required: true }, // YYYY-MM-DD
     hours: { type: Number, required: true, min: 0.5, max: 24 },
     note: { type: String, default: null },

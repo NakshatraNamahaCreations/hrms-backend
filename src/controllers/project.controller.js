@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
+const dayjs = require('dayjs');
 const Project = require('../models/Project');
+const ProjectTemplate = require('../models/ProjectTemplate');
 const Timesheet = require('../models/Timesheet');
 const Task = require('../models/Task');
 const Employee = require('../models/Employee');
@@ -22,6 +24,37 @@ const TIMESHEET_POPULATE = [
   { path: 'actionBy', select: 'name' },
 ];
 
+/**
+ * Copies a template's phases onto a new project and spreads them evenly across
+ * the contract period, so the project opens with a dated plan the manager can
+ * adjust rather than an empty timeline.
+ */
+const blueprintFields = async (companyId, body) => {
+  const out = {
+    contractValue: Number(body.contractValue) || 0,
+    budget: Number(body.budget) || 0,
+    billingType: body.billingType || null,
+  };
+  if (!body.templateId) return out;
+  const template = await ProjectTemplate.findOne({ _id: body.templateId, companyId, isDeleted: false }).lean();
+  if (!template) throw new ApiError(400, 'Unknown project template');
+  out.templateId = template._id;
+  out.billingType = out.billingType || template.billing;
+
+  const start = body.startDate ? dayjs(body.startDate) : dayjs();
+  const end = body.endDate ? dayjs(body.endDate) : start.add(90, 'day');
+  const span = Math.max(1, end.diff(start, 'day'));
+  const n = template.phases.length || 1;
+  out.phases = template.phases.map((ph, i) => ({
+    name: ph.name,
+    gate: ph.gate,
+    startDate: start.add(Math.round((i * span) / n), 'day').toDate(),
+    endDate: start.add(Math.round(((i + 1) * span) / n) - 1, 'day').toDate(),
+  }));
+  out.currentPhase = 0;
+  return out;
+};
+
 // POST /projects (manager+)
 const createProject = asyncHandler(async (req, res) => {
   const companyId = getCompanyId(req);
@@ -41,6 +74,7 @@ const createProject = asyncHandler(async (req, res) => {
     endDate: req.body.endDate ? new Date(req.body.endDate) : null,
     managerId: req.body.managerId || null,
     members: Array.isArray(req.body.members) ? req.body.members : [],
+    ...(await blueprintFields(companyId, req.body)),
   });
   return created(res, project, 'Project created');
 });
@@ -77,7 +111,10 @@ const updateProject = asyncHandler(async (req, res) => {
   if (req.body.status && !PROJECT_STATUS.includes(req.body.status)) {
     throw new ApiError(400, `status must be one of: ${PROJECT_STATUS.join(', ')}`);
   }
-  const updatable = ['name', 'code', 'clientId', 'description', 'status', 'startDate', 'endDate', 'managerId', 'members'];
+  const updatable = [
+    'name', 'code', 'clientId', 'description', 'status', 'startDate', 'endDate', 'managerId', 'members',
+    'contractValue', 'budget', 'billingType', 'progressOverride', 'phases', 'currentPhase',
+  ];
   for (const key of updatable) {
     if (req.body[key] !== undefined) project[key] = req.body[key];
   }

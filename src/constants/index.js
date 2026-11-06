@@ -141,6 +141,18 @@ const CONFIRMATION_STATUS = ['probation', 'confirmed'];
 
 // --- Projects & Timesheets ------------------------------------------------------
 const PROJECT_STATUS = ['active', 'on_hold', 'completed'];
+
+// Optional modules a project template can switch on. One row of any of these
+// lives in ProjectModuleItem, keyed by this value.
+const PROJECT_MODULES = [
+  'approvals', 'changes', 'snags', 'materials', 'shoot', 'rights', 'drawings',
+  'deadlines', 'dpr', 'vendors', 'deliverables', 'sessions', 'visits', 'docs',
+];
+// How a project bills, which decides what "contract value" means on screen.
+const PROJECT_BILLING = [
+  'milestone', 'fixed_fee', 'percentage', 'running_account', 'advance_settlement',
+  'retainer', 'package', 'per_unit', 'per_learner', 'annual_contract',
+];
 const TIMESHEET_STATUS = ['submitted', 'approved', 'rejected'];
 
 // --- Training ---------------------------------------------------------------------
@@ -188,6 +200,8 @@ module.exports = {
   LOAN_PAYMENT_METHODS,
   CONFIRMATION_STATUS,
   PROJECT_STATUS,
+  PROJECT_MODULES,
+  PROJECT_BILLING,
   TIMESHEET_STATUS,
   COURSE_TYPES,
   ASSIGNMENT_STATUS,

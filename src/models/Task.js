@@ -10,6 +10,10 @@ const taskSchema = new mongoose.Schema(
     assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'Employee', required: true },
     assignedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     dueDate: { type: Date, default: null },
+    // Which project phase this task belongs to, as an index into project.phases.
+    phaseIndex: { type: Number, default: null },
+    // Planned hours, so the timesheet total beside it shows over-run.
+    estimateHours: { type: Number, default: null },
     priority: { type: String, enum: ['low', 'medium', 'high'], default: 'medium' },
     status: { type: String, enum: TASK_STATUS, default: 'todo' },
     completedAt: { type: Date, default: null },
