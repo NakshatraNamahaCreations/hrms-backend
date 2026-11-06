@@ -20,6 +20,33 @@ const { ROLES, FEATURE_KEYS } = require('../constants');
 
 const empName = (e) => (e && e.personal ? `${e.personal.firstName} ${e.personal.lastName || ''}`.trim() : '');
 
+// Department and employee-status filters apply to every company report, but the
+// reports are rooted on different collections: employee-rooted ones can match in
+// place, the rest need the matching employee ids resolved first.
+const employeeMatch = (req) => {
+  const match = {};
+  if (req.query.departmentId) match['job.departmentId'] = req.query.departmentId;
+  const status = req.query.employeeStatus;
+  if (status && status !== 'all') match.status = status;
+  return match;
+};
+
+// Returns null when no employee-level filter is active so callers skip the extra
+// query entirely — scoping to an id list would otherwise silently drop rows whose
+// employee reference no longer resolves.
+const scopedEmployeeIds = async (companyId, req) => {
+  const match = employeeMatch(req);
+  if (!Object.keys(match).length) return null;
+  const docs = await Employee.find({ companyId, isDeleted: false, ...match }).select('_id').lean();
+  return docs.map((d) => d._id);
+};
+
+// Narrows a filter rooted on another collection to the scoped employees.
+const withEmployeeScope = (filter, ids, field = 'employeeId') => {
+  if (ids === null) return filter;
+  return { ...filter, [field]: { $in: ids } };
+};
+
 const dateRange = (req) => {
   const from = req.query.from || dayjs().startOf('month').format('YYYY-MM-DD');
   const to = req.query.to || dayjs().format('YYYY-MM-DD');
@@ -32,6 +59,7 @@ const employeesReport = async (companyId, req) => {
   const filter = { companyId, isDeleted: false };
   if (req.query.status) filter.status = req.query.status;
   if (req.query.employeeType) filter['job.employeeType'] = req.query.employeeType;
+  Object.assign(filter, employeeMatch(req));
   const employees = await Employee.find(filter)
     .populate('job.branchId job.departmentId job.designationId', 'name')
     .lean();
@@ -54,8 +82,9 @@ const employeesReport = async (companyId, req) => {
 
 const attendanceReport = async (companyId, req, extraFilter = {}) => {
   const { from, to } = dateRange(req);
-  const filter = { companyId, date: { $gte: from, $lte: to }, ...extraFilter };
+  let filter = { companyId, date: { $gte: from, $lte: to }, ...extraFilter };
   if (req.query.employeeId) filter.employeeId = req.query.employeeId;
+  else filter = withEmployeeScope(filter, await scopedEmployeeIds(companyId, req));
   const records = await Attendance.find(filter)
     .populate('employeeId', 'employeeCode personal.firstName personal.lastName')
     .sort({ date: 1 })
@@ -78,7 +107,7 @@ const attendanceReport = async (companyId, req, extraFilter = {}) => {
 
 const fieldAttendanceReport = async (companyId, req) => {
   const { from, to } = dateRange(req);
-  const filter = { companyId, isDeleted: false, 'job.employeeType': 'field_employee' };
+  const filter = { companyId, isDeleted: false, 'job.employeeType': 'field_employee', ...employeeMatch(req) };
   const fieldEmployees = await Employee.find(filter).select('employeeCode personal').lean();
   const rows = [];
   for (const emp of fieldEmployees) {
@@ -112,8 +141,9 @@ const fieldAttendanceReport = async (companyId, req) => {
 
 const clientVisitsReport = async (companyId, req) => {
   const { from, to } = dateRange(req);
-  const filter = { companyId, date: { $gte: from, $lte: to } };
+  let filter = { companyId, date: { $gte: from, $lte: to } };
   if (req.query.clientId) filter.clientId = req.query.clientId;
+  filter = withEmployeeScope(filter, await scopedEmployeeIds(companyId, req));
   const visits = await FieldVisit.find(filter)
     .populate('employeeId', 'employeeCode personal.firstName personal.lastName')
     .populate('clientId', 'name')
@@ -140,8 +170,9 @@ const clientVisitsReport = async (companyId, req) => {
 
 const leavesReport = async (companyId, req) => {
   const { from, to } = dateRange(req);
-  const filter = { companyId, fromDate: { $lte: to }, toDate: { $gte: from } };
+  let filter = { companyId, fromDate: { $lte: to }, toDate: { $gte: from } };
   if (req.query.status) filter.status = req.query.status;
+  filter = withEmployeeScope(filter, await scopedEmployeeIds(companyId, req));
   const leaves = await Leave.find(filter)
     .populate('employeeId', 'employeeCode personal.firstName personal.lastName')
     .lean();
@@ -163,7 +194,7 @@ const leavesReport = async (companyId, req) => {
 const payrollReport = async (companyId, req) => {
   const month = Number(req.query.month) || dayjs().month() + 1;
   const year = Number(req.query.year) || dayjs().year();
-  const items = await Payroll.find({ companyId, month, year })
+  const items = await Payroll.find(withEmployeeScope({ companyId, month, year }, await scopedEmployeeIds(companyId, req)))
     .populate('employeeId', 'employeeCode personal.firstName personal.lastName')
     .lean();
   return {
@@ -193,6 +224,7 @@ const newJoinersReport = async (companyId, req) => {
     companyId,
     isDeleted: false,
     'job.joiningDate': { $gte: dayjs(from).toDate(), $lte: dayjs(to).endOf('day').toDate() },
+    ...employeeMatch(req),
   })
     .populate('job.departmentId job.designationId', 'name')
     .lean();
@@ -212,8 +244,9 @@ const newJoinersReport = async (companyId, req) => {
 };
 
 const exitsReport = async (companyId, req) => {
-  const filter = { companyId };
+  let filter = { companyId };
   if (req.query.status) filter.status = req.query.status;
+  filter = withEmployeeScope(filter, await scopedEmployeeIds(companyId, req));
   const resignations = await Resignation.find(filter)
     .populate('employeeId', 'employeeCode personal.firstName personal.lastName')
     .lean();
@@ -234,9 +267,10 @@ const exitsReport = async (companyId, req) => {
 
 const expensesReport = async (companyId, req) => {
   const { from, to } = dateRange(req);
-  const filter = { companyId, date: { $gte: from, $lte: to } };
+  let filter = { companyId, date: { $gte: from, $lte: to } };
   if (req.query.status) filter.status = req.query.status;
   if (req.query.employeeId) filter.employeeId = req.query.employeeId;
+  else filter = withEmployeeScope(filter, await scopedEmployeeIds(companyId, req));
   const expenses = await FieldExpense.find(filter)
     .populate('employeeId', 'employeeCode personal.firstName personal.lastName')
     .sort({ date: 1 })
@@ -259,7 +293,8 @@ const assetsReport = async (companyId, req) => {
   const filter = { companyId, isDeleted: false };
   if (req.query.status) filter.status = req.query.status;
   if (req.query.category) filter.category = req.query.category;
-  const assets = await Asset.find(filter)
+  const assetFilter = withEmployeeScope(filter, await scopedEmployeeIds(companyId, req), 'assignedTo');
+  const assets = await Asset.find(assetFilter)
     .populate('assignedTo', 'employeeCode personal.firstName personal.lastName')
     .lean();
   return {
