@@ -20,6 +20,7 @@ const { notify } = require('../services/notification.service');
 const { logAudit } = require('../middleware/audit');
 const { toPublicUrl } = require('../middleware/upload');
 const { generateLetterForEmployee } = require('./document.controller');
+const employeeInsights = require('../services/employeeInsights.service');
 const { ROLES, ONBOARDING_STATUS } = require('../constants');
 
 const POPULATE = [
@@ -29,6 +30,11 @@ const POPULATE = [
   { path: 'job.shiftId', select: 'name startTime endTime' },
   { path: 'job.managerId', select: 'employeeCode personal.firstName personal.lastName' },
 ];
+
+// Ratings are compensation-adjacent: only the roles that already see salary
+// data get them. Everyone else gets a list with no `performance` key at all,
+// so the client can hide the column rather than render an empty one.
+const PERFORMANCE_ROLES = [ROLES.COMPANY_ADMIN, ROLES.HR_ADMIN, ROLES.SUPER_ADMIN];
 
 const ALLOWED_LOGIN_ROLES = [ROLES.HR_ADMIN, ROLES.MANAGER, ROLES.EMPLOYEE, ROLES.FIELD_EMPLOYEE, ROLES.PAYROLL_ADMIN];
 
@@ -135,10 +141,29 @@ const createEmployee = asyncHandler(async (req, res) => {
 const listEmployees = asyncHandler(async (req, res) => {
   const companyId = getCompanyId(req);
   const filter = { companyId, isDeleted: false };
+
+  // Saved view (all | active | probation | notice | incomplete | exited). It may
+  // resolve to a plain filter, an id list, or both.
+  const idSets = [];
+  if (req.query.view) {
+    const scope = await employeeInsights.viewScope(companyId, req.query.view);
+    Object.assign(filter, scope.filter);
+    if (scope.ids) idSets.push(scope.ids);
+  }
+  // Signal chips (drift / lowConfidence / keyPerson / birthday / probationDue).
+  const signal = await employeeInsights.signalIds(companyId, req.query);
+  if (signal) idSets.push(signal);
+  if (idSets.length) {
+    // Intersect so several chips narrow rather than widen.
+    const ids = idSets.reduce((acc, list) => acc.filter((x) => new Set(list).has(x)));
+    filter._id = { $in: ids };
+  }
+
   if (req.query.branchId) filter['job.branchId'] = req.query.branchId;
   if (req.query.departmentId) filter['job.departmentId'] = req.query.departmentId;
   if (req.query.designationId) filter['job.designationId'] = req.query.designationId;
   if (req.query.status) filter.status = req.query.status;
+  if (req.query.employmentType) filter['job.employmentType'] = req.query.employmentType;
   if (req.query.employeeType) filter['job.employeeType'] = req.query.employeeType;
   if (req.query.onboardingStatus) filter.onboardingStatus = req.query.onboardingStatus;
   if (req.query.managerId) filter['job.managerId'] = req.query.managerId;
@@ -149,7 +174,24 @@ const listEmployees = asyncHandler(async (req, res) => {
     populate: POPULATE,
     select: '-salary -bank',
   });
+
+  // ?enrich=1 adds the derived directory columns (30-day attendance strip,
+  // profile completeness, key-person risk, notice period). Off by default so
+  // existing callers keep the cheap query.
+  if (req.query.enrich === '1' || req.query.enrich === 'true') {
+    const rows = await employeeInsights.enrich(companyId, items, {
+      includePerformance: PERFORMANCE_ROLES.includes(req.user.role),
+    });
+    return ok(res, rows, 'Employees', pagination);
+  }
   return ok(res, items, 'Employees', pagination);
+});
+
+// GET /employees/overview — saved-view counts and signal counts for the directory
+const employeeOverview = asyncHandler(async (req, res) => {
+  const companyId = getCompanyId(req);
+  const data = await employeeInsights.overview(companyId);
+  return ok(res, { ...data, canSeePerformance: PERFORMANCE_ROLES.includes(req.user.role) }, 'Employee overview');
 });
 
 // GET /employees/:id
@@ -540,6 +582,7 @@ module.exports = {
   createEmployee,
   createEmployeeRecord,
   listEmployees,
+  employeeOverview,
   getEmployee,
   updateEmployee,
   updateOnboardingStatus,

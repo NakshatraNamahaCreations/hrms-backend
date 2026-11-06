@@ -18,6 +18,7 @@ router.post('/', requireRole(...HR), audit('employee.create', 'Employee'), contr
 router.get('/import-template', requireRole(...HR), controller.importTemplate);
 router.post('/bulk-import', requireRole(...HR), upload.single('file'), controller.bulkImport);
 router.get('/probation-due', requireRole(...HR), controller.probationDue);
+router.get('/overview', requireRole(...HR_PLUS_MANAGER), controller.employeeOverview);
 router.get('/org-chart', controller.orgChart); // all roles — read-only company hierarchy
 router.get('/:id', controller.getEmployee); // self-or-admin enforced in controller
 router.put('/:id', requireRole(...HR), controller.updateEmployee);
